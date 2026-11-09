@@ -11,9 +11,17 @@ import { fetchFeed } from "../src/rss.ts";
 
 const PAUSE_BETWEEN_FEEDS_MS = 1500;
 const MAX_DESCRIPTION_CHARS = 1500;
+const MAX_ITEMS = 50;
+const MAX_FIELD = 500;
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
+}
+
+// Логи GitHub Actions у публічному репозиторії видно всім:
+// у CI показуємо лише id підписки, не її назву.
+function label(sub) {
+  return process.env.GITHUB_ACTIONS === "true" ? `sub ${sub.id}` : sub.name;
 }
 
 function loadConfig() {
@@ -57,26 +65,44 @@ async function main() {
   const { subs } = await api(cfg, "GET", "/api/subs");
   log(`підписок до опитування: ${subs.length}`);
 
+  let failed = 0;
   for (const [i, sub] of subs.entries()) {
     if (i > 0) await sleep(PAUSE_BETWEEN_FEEDS_MS);
-    const result = await fetchFeed(sub.url);
-
-    if (!result.ok) {
-      log(`✗ ${sub.name}: ${result.error}`);
-      // Остаточні помилки повідомляємо Worker'у (він видалить непідтверджену підписку)
-      const fatal = result.kind === "invalid" || result.status === 404 || result.status === 410;
-      if (fatal) await api(cfg, "POST", "/api/ingest", { subId: sub.id, error: result.error, fatal: true });
-      continue;
+    // Помилка однієї підписки не повинна зупиняти решту
+    try {
+      await pollOne(cfg, sub);
+    } catch (err) {
+      failed++;
+      log(`✗ ${label(sub)}: ${err.message}`);
     }
-
-    const items = result.feed.items.map((it) => ({ ...it, description: stripHtml(it.description) }));
-    const res = await api(cfg, "POST", "/api/ingest", {
-      subId: sub.id,
-      feedTitle: result.feed.title,
-      items,
-    });
-    log(`✓ ${sub.name}: у стрічці ${items.length}, ${JSON.stringify(res)}`);
   }
+  if (failed > 0) process.exitCode = 1;
+}
+
+async function pollOne(cfg, sub) {
+  const result = await fetchFeed(sub.url);
+
+  if (!result.ok) {
+    log(`✗ ${label(sub)}: ${result.error}`);
+    // Остаточні помилки повідомляємо Worker'у (він видалить непідтверджену підписку)
+    const fatal = result.kind === "invalid" || result.status === 404 || result.status === 410;
+    if (fatal) await api(cfg, "POST", "/api/ingest", { subId: sub.id, error: result.error, fatal: true });
+    return;
+  }
+
+  const items = result.feed.items.slice(0, MAX_ITEMS).map((it) => ({
+    key: it.key.slice(0, MAX_FIELD),
+    title: it.title.slice(0, MAX_FIELD),
+    link: it.link.slice(0, MAX_FIELD),
+    description: stripHtml(it.description),
+    pubDate: it.pubDate,
+  }));
+  const res = await api(cfg, "POST", "/api/ingest", {
+    subId: sub.id,
+    feedTitle: result.feed.title.slice(0, MAX_FIELD),
+    items,
+  });
+  log(`✓ ${label(sub)}: у стрічці ${items.length}, надіслано ${res.sent ?? 0}${res.seeded ? " (перше опитування)" : ""}`);
 }
 
 main().catch((err) => {

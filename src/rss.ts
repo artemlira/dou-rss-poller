@@ -91,6 +91,27 @@ export type FetchFeedResult =
       status?: number;
     };
 
+const MAX_FEED_BYTES = 2 * 1024 * 1024;
+
+/** Читає тіло відповіді, перериваючи завантаження, якщо воно більше за ліміт. */
+async function readTextLimited(res: Response, maxBytes: number): Promise<string | null> {
+  const reader = res.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new Blob(chunks).text();
+}
+
 export async function fetchFeed(url: string): Promise<FetchFeedResult> {
   let parsed: URL;
   try {
@@ -118,7 +139,10 @@ export async function fetchFeed(url: string): Promise<FetchFeedResult> {
     return { ok: false, kind: "unreachable", status: res.status, error: `Сервер відповів ${res.status}.` };
   }
 
-  const feed = parseFeed(await res.text());
+  const body = await readTextLimited(res, MAX_FEED_BYTES);
+  if (body === null) return { ok: false, kind: "invalid", error: "Стрічка завелика або порожня." };
+
+  const feed = parseFeed(body);
   if (!feed) return { ok: false, kind: "invalid", error: "За цим посиланням немає RSS/Atom-стрічки." };
   return { ok: true, feed };
 }
