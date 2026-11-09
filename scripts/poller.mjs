@@ -84,9 +84,10 @@ async function pollOne(cfg, sub) {
 
   if (!result.ok) {
     log(`✗ ${label(sub)}: ${result.error}`);
-    // Остаточні помилки повідомляємо Worker'у (він видалить непідтверджену підписку)
+    // Усі помилки передаємо Worker'у: він рахує збої поспіль і сповіщає;
+    // остаточні (fatal) ще й видаляють непідтверджену підписку
     const fatal = result.kind === "invalid" || result.status === 404 || result.status === 410;
-    if (fatal) await api(cfg, "POST", "/api/ingest", { subId: sub.id, error: result.error, fatal: true });
+    await api(cfg, "POST", "/api/ingest", { subId: sub.id, error: result.error, fatal });
     return;
   }
 
